@@ -1,0 +1,781 @@
+import express from "express"
+import dotenv from "dotenv"
+import connectDb from "./utils/connectDb.js"
+import authRouter from "./routes/auth.route.js"
+import cookieParser from "cookie-parser"
+import cors from "cors"
+import userRouter from "./routes/user.route.js"
+import notesRouter from "./routes/genrate.route.js"
+import pdfRouter from "./routes/pdf.route.js"
+import creditRouter from "./routes/credits.route.js"
+import { stripeWebhook } from "./controllers/credits.controller.js"
+dotenv.config()
+
+const app = express()
+
+app.post(
+  "/api/credits/webhook",
+  express.raw({ type: "application/json" }),
+  stripeWebhook
+);
+
+app.use(cors(
+    {origin:"http://localhost:5173",
+        credentials:true,
+        methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    }
+))
+
+
+
+app.use(express.json())
+app.use(cookieParser())
+const PORT = process.env.PORT || 5000
+app.get("/",(req,res)=>{
+    res.json({message:"ExamNotes AI Backend Running 🚀"})
+
+})
+app.use("/api/auth" , authRouter)
+app.use("/api/user", userRouter)
+app.use("/api/notes", notesRouter)
+app.use("/api/pdf", pdfRouter)
+app.use("/api/credit",creditRouter)
+
+
+
+app.listen(PORT,()=>{
+    console.log(`✅ Server running on port ${PORT}`)
+    connectDb()
+})
+
+import mongoose from "mongoose";
+
+const connectDb = async () => {
+    try {
+        await mongoose.connect(process.env.MONGODB_URL)
+        console.log("DB Connected")
+    } catch (error) {
+        console.log("DB Error")
+    }
+}
+export default connectDb
+
+export const buildPrompt = ({
+  topic,
+  classLevel,
+  examType,
+  revisionMode,
+  includeDiagram,
+  includeChart
+}) => {
+  return `
+You are a STRICT JSON generator for an exam preparation system.
+
+⚠️ VERY IMPORTANT:
+- Output MUST be valid JSON
+- Your response will be parsed using JSON.parse()
+- INVALID JSON will cause system failure
+- Use ONLY double quotes "
+- NO comments, NO trailing commas
+- Escape line breaks using \\n
+- Do NOT use emojis inside text values
+
+TASK:
+Convert the given topic into exam-focused notes.
+
+INPUT:
+Topic: ${topic}
+Class Level: ${classLevel || "Not specified"}
+Exam Type: ${examType || "General"}
+Revision Mode: ${revisionMode ? "ON" : "OFF"}
+Include Diagram: ${includeDiagram ? "YES" : "NO"}
+Include Charts: ${includeChart ? "YES" : "NO"}
+
+GLOBAL CONTENT RULES:
+- Use clear, simple, exam-oriented language
+- Notes MUST be Markdown formatted
+- Headings and bullet points only
+
+REVISION MODE RULES (CRITICAL):
+- If REVISION MODE is ON:
+  - Notes must be VERY SHORT
+  - Only bullet points
+  - One-line answers only
+  - Definitions, formulas, keywords
+  - No paragraphs
+  - No explanations
+  - Content must feel like:
+    - last-day revision
+    - 5-minute exam cheat sheet
+  - revisionPoints MUST summarize ALL important facts
+
+- If REVISION MODE is OFF:
+  - Notes must be DETAILED but exam-focused
+  - Each topic should include:
+    - definition
+    - short explanation
+    - examples (if applicable)
+  - Paragraph length: max 2–4 lines
+  - No storytelling, no extra theory
+
+IMPORTANCE RULES:
+- Divide sub-topics into THREE categories:
+  - ⭐ Very Important Topics
+  - ⭐⭐ Important Topics
+  - ⭐⭐⭐ Frequently Asked Topics
+- All three categories MUST be present
+- Base importance on exam frequency and weightage
+
+DIAGRAM RULES:
+- If INCLUDE DIAGRAM is YES:
+  - diagram.data MUST be a SINGLE STRING
+  - Valid Mermaid syntax only
+  - Must start with: graph TD
+  - Wrap EVERY node label in square brackets [ ]
+  - Do NOT use special characters inside labels
+- If INCLUDE DIAGRAM is NO:
+  - diagram.data MUST be ""
+
+CHART RULES (RECHARTS):
+- If INCLUDE CHARTS is YES:
+  - charts array MUST NOT be empty
+  - Generate at least ONE chart
+  - Choose chart based on topic type:
+    - THEORY topic → bar or pie (importance / weightage)
+    - PROCESS topic → bar or line (steps / stages)
+  - Use numeric values ONLY
+  - Labels must be short and exam-oriented
+- If INCLUDE CHARTS is NO:
+  - charts MUST be []
+
+CHART TYPES ALLOWED:
+- bar
+- line
+- pie
+
+CHART OBJECT FORMAT:
+{
+  "type": "bar | line | pie",
+  "title": "string",
+  "data": [
+    { "name": "string", "value": 10 }
+  ]
+}
+
+STRICT JSON FORMAT (DO NOT CHANGE):
+
+{
+  "subTopics": {
+    "⭐": [],
+    "⭐⭐": [],
+    "⭐⭐⭐": []
+  },
+  "importance": "⭐ | ⭐⭐ | ⭐⭐⭐",
+  "notes": "string",
+  "revisionPoints": [],
+  "questions": {
+    "short": [],
+    "long": [],
+    "diagram": ""
+  },
+  "diagram": {
+    "type": "flowchart | graph | process",
+    "data": ""
+  },
+  "charts": []
+}
+
+RETURN ONLY VALID JSON.
+`;
+};
+
+import jwt from "jsonwebtoken"
+
+export const getToken = async (userId) => {
+    try {
+        const token = jwt.sign({userId} ,process.env.JWT_SECRET , {expiresIn:"7d"}  )
+        console.log(token)
+        return token
+       
+    } catch (error) {
+        console.log(error)
+    }
+}
+
+
+
+const Gemini_URL = 
+"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent"
+
+export const generateGeminiResponse = async (prompt) => {
+
+    try {
+         const response = await fetch(`${Gemini_URL}?key=${process.env.GEMINI_API_KEY}`,{
+        method:"POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                {
+                  text: prompt
+                }
+              ]
+            }
+          ]
+        })
+
+    })
+
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(err);
+    }
+
+    const data = await response.json()
+
+    const text =
+      data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!text) {
+      throw new Error("No text returned from Gemini");
+    }
+
+    const cleanText = text
+      .replace(/```json/g, "")
+      .replace(/```/g, "")
+      .trim();
+
+      return JSON.parse(cleanText);
+
+
+
+    } catch (error) {
+        console.error("Gemini Fetch Error:", error.message);
+    throw new Error("Gemini API fetch failed");
+    }
+   
+}
+
+
+import express from "express"
+import { googleAuth, logOut } from "../controllers/auth.controller.js"
+
+const authRouter = express.Router()
+
+authRouter.post("/google" , googleAuth)
+authRouter.get("/logout" , logOut)
+export default authRouter
+
+import express from "express"
+import isAuth from "../middleware/isAuth.js"
+import { createCreditsOrder } from "../controllers/credits.controller.js"
+
+
+const creditRouter = express.Router()
+creditRouter.post("/order" , isAuth ,createCreditsOrder )
+
+export default creditRouter
+
+import express from "express"
+import isAuth from "../middleware/isAuth.js"
+import { generateNotes } from "../controllers/generate.controller.js"
+import { getMyNotes, getSingleNotes } from "../controllers/notes.controller.js"
+
+
+
+const notesRouter = express.Router()
+
+
+notesRouter.post("/generate-notes",isAuth,generateNotes)
+notesRouter.get("/getnotes", isAuth,getMyNotes)
+notesRouter.get("/:id" , isAuth , getSingleNotes)
+
+export default notesRouter
+
+import express from "express"
+import isAuth from "../middleware/isAuth.js"
+
+import { pdfDownload } from "../controllers/pdf.controller.js"
+
+
+
+const pdfRouter = express.Router()
+
+
+pdfRouter.post("/generate-pdf",isAuth,pdfDownload)
+
+export default pdfRouter
+
+
+import express from "express"
+import isAuth from "../middleware/isAuth.js"
+import { getCurrentUser } from "../controllers/user.controller.js"
+
+
+const userRouter = express.Router()
+
+
+userRouter.get("/currentuser",isAuth,getCurrentUser)
+
+export default userRouter
+
+
+import mongoose from "mongoose";
+const notesSchema = new mongoose.Schema({
+     user: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "UserModel",
+      required: true
+    },
+
+    topic: {
+      type: String,
+      required: true
+    },
+
+    classLevel: String,
+    examType: String,
+
+    revisionMode: {
+      type: Boolean,
+      default: false
+    },
+
+    includeDiagram: Boolean,
+    includeChart: Boolean,
+
+    content: {
+      type: mongoose.Schema.Types.Mixed, // AI response (string / JSON)
+      required: true
+    }
+
+},{timestamps:true})
+
+const Notes = mongoose.model("Notes" , notesSchema)
+
+export default Notes
+
+
+import mongoose from "mongoose";
+
+const userSchema = new mongoose.Schema({
+    name:{
+        type:String,
+        required:true
+    },
+    email:{
+        type:String,
+        unique:true,
+        required:true
+    },
+    credits:{
+        type:Number,
+        default:50,
+        min:0
+    },
+    isCreditAvailable:{
+        type:Boolean,
+        default:true
+    },
+    notes:{
+        type:[mongoose.Schema.Types.ObjectId],
+        ref:"Notes",
+        default:[]
+
+    }
+
+},{timestamps:true})
+
+const UserModel = mongoose.model("UserModel" , userSchema)
+
+export default UserModel
+
+
+import jwt from "jsonwebtoken"
+
+const isAuth = async (req,res,next) => {
+    try {
+        let {token} = req.cookies
+        if(!token){
+            return res.status(400).json({message:"Token is not found"})
+        }
+        let verifyToken = jwt.verify(token ,process.env.JWT_SECRET )
+        if(!verifyToken){
+            return res.status(400).json({message:"user doesn't have valid token"})
+        }
+        req.userId = verifyToken.userId
+        next()
+
+    } catch (error) {
+        return res.status(500).json({message:`is auth error ${error}`})
+    }
+}
+export default isAuth
+
+
+import UserModel from "../models/user.model.js"
+import { getToken } from "../utils/token.js"
+
+
+export const googleAuth = async (req,res) => {
+    try {
+        
+        const {name , email} = req.body
+        let user = await UserModel.findOne({email})
+        if(!user){
+            user = await UserModel.create({
+                name , email
+            })
+        }
+        let token = await getToken(user._id)
+        res.cookie("token" , token , {
+            httpOnly:true,
+            secure:true,
+            samesite:"none",
+            path:"/",
+            maxAge:7 * 24 * 60 * 60 * 1000
+
+        })
+        return res.status(200).json(user)
+    } catch (error) {
+        return res.status(500).json({message:`googleSignup Error  ${error}`})
+    }
+    
+}
+
+export const logOut = async (req,res) => {
+    try {
+        await res.clearCookie("token")
+         return res.status(200).json({message:"LogOut Successfully"})
+    } catch (error) {
+        return res.status(500).json({message:`Logout Error  ${error}`})
+    }
+}
+
+
+import Stripe from "stripe";
+import UserModel from "../models/user.model.js";
+import dotenv from "dotenv";
+dotenv.config();
+
+if (!process.env.STRIPE_SECRET_KEY) {
+  throw new Error("Stripe secret key missing in .env");
+}
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+const CREDIT_MAP = {
+  100: 50,
+  200: 120,
+  500: 300,
+};
+
+export const createCreditsOrder = async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { amount } = req.body;
+
+    if (!CREDIT_MAP[amount]) {
+      return res.status(400).json({
+        message: "Invalid credit plan",
+      });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      payment_method_types: ["card"],
+      success_url: `${process.env.CLIENT_URL}/payment-success`,
+      cancel_url: `${process.env.CLIENT_URL}/payment-failed`,
+      line_items: [
+        {
+          price_data: {
+            currency: "inr",
+            product_data: {
+              name: `${CREDIT_MAP[amount]} Credits`,
+            },
+            unit_amount: amount * 100,
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        userId,
+        credits: CREDIT_MAP[amount],
+      },
+    });
+
+    res.status(200).json({ url: session.url });
+  } catch (error) {
+    res.status(500).json({ message: "Stripe error" });
+  }
+};
+
+export const stripeWebhook = async (req, res) => {
+  const sig = req.headers["stripe-signature"];
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET,
+    );
+  } catch (error) {
+    console.log("❌ Webhook signature error:", error.message);
+    return res.status(400).send("Webhook Error");
+  }
+
+  if (event.type === "checkout.session.completed") {
+    const session = event.data.object;
+
+    const userId = session.metadata.userId;
+    const creditsToAdd = Number(session.metadata.credits);
+
+    if (!userId || !creditsToAdd) {
+      return res.status(400).json({ message: "Invalid metadata" });
+    }
+
+    const user = await UserModel.findByIdAndUpdate(
+      userId,
+      {
+        $inc: { credits: creditsToAdd },
+        $set: { isCreditAvailable: true },
+      },
+      { new: true },
+    );
+  }
+
+  res.json({ received: true });
+};
+
+
+import Notes from "../models/notes.model.js"
+import UserModel from "../models/user.model.js"
+import { generateGeminiResponse } from "../services/gemini.services.js"
+import { buildPrompt } from "../utils/promptBuilder.js"
+
+export const generateNotes = async (req, res) => {
+    try {
+        const {
+            topic,
+            classLevel,
+            examType,
+            revisionMode = false,
+            includeDiagram = false,
+            includeChart = false
+        } = req.body;
+        if (!topic) {
+            return res.status(400).json({ message: "Topic is required" })
+        }
+        const user = await UserModel.findById(req.userId)
+        if (!user) {
+            return res.status(400).json({ message: "user is not found" })
+        }
+
+        if (user.credits < 10) {
+            user.isCreditAvailable = false
+            await user.save()
+            return res.status(403).json({
+                message: "Insufficient credits"
+            });
+        }
+
+        const prompt = buildPrompt({
+            topic,
+            classLevel,
+            examType,
+            revisionMode,
+            includeDiagram,
+            includeChart
+        })
+
+
+        const aiResponse = await generateGeminiResponse(prompt)
+   
+
+        const notes = await Notes.create({
+            user: user._id,
+            topic,
+            classLevel,
+            examType,
+            revisionMode,
+            includeDiagram,
+            includeChart,
+            content: aiResponse
+
+
+        })
+
+
+        user.credits -= 10;
+        if (user.credits <= 0) user.isCreditAvailable = false;
+
+        if (!Array.isArray(user.notes)) {
+            user.notes = [];
+        }
+
+        user.notes.push(notes._id);
+
+        await user.save();
+
+        return res.status(200).json({
+            data: aiResponse,
+      noteId: notes._id,
+      creditsLeft: user.credits
+        })
+
+
+
+
+    } catch (error) {
+        console.error(error);
+    res.status(500).json({
+      error: "AI generation failed",
+      message: error.message
+    });
+
+    }
+}
+
+import Notes from "../models/notes.model.js"
+
+
+export const getMyNotes = async (req, res) => {
+    try {
+        const notes = await Notes.find({ user: req.userId }).select("topic classLevel examType revisionMode includeDiagram includeChart createdAt").sort({ createdAt: -1 })
+        if (!notes) {
+            return res.status(404).json({
+                error: "Notes not found"
+            });
+        }
+
+        return res.status(200).json(notes)
+    } catch (error) {
+        return res.status(500).json({ message: `getCurrentUser notes error  ${error}` })
+    }
+}
+
+export const getSingleNotes = async (req, res) => {
+    try {
+        const notes = await Notes.findOne({
+            _id: req.params.id,
+            user: req.userId
+        })
+        if (!notes) {
+            return res.status(404).json({
+                error: "Notes not found"
+            });
+        }
+        return res.json({
+      content: notes.content,
+      topic: notes.topic,
+      createdAt: notes.createdAt
+    });
+    } catch (error) {
+ return res.status(500).json({ message: `getSingle notes error  ${error}` })
+    }
+}
+
+import PDFDocument from "pdfkit"
+
+export const pdfDownload = async (req,res) => {
+        const {result} = req.body;
+
+    if (!result) {
+    return res.status(400).json({ error: "No content provided" });
+  }
+
+  const doc = new PDFDocument({margin:50})
+
+  res.setHeader("Content-Type", "application/pdf")
+  res.setHeader("Content-Disposition",
+    'attachment; filename="ExamNotesAI.pdf"')
+
+    doc.pipe(res)
+
+      // Title
+  doc.fontSize(20).text("ExamNotes AI", { align: "center" });
+  doc.moveDown();
+  doc.fontSize(14).text(`Importance: ${result.importance}`);
+  doc.moveDown();
+
+  // Sub Topics
+  doc.fontSize(16).text("Sub Topics");
+  doc.moveDown(0.5);
+  Object.entries(result.subTopics).forEach(([star, topics]) => {
+  doc.moveDown(0.5);
+  doc.fontSize(13).text(`${star} Topics:`);
+
+  topics.forEach((t) => {
+    doc.fontSize(12).text(`• ${t}`);
+  });
+});
+
+
+  doc.moveDown();
+
+  // Notes
+  doc.fontSize(16).text("Notes");
+  doc.moveDown(0.5);
+  doc.fontSize(12).text(result.notes.replace(/[#*]/g, ""));
+
+  doc.moveDown();
+  
+
+
+  // Revision Points
+  doc.fontSize(16).text("Revision Points");
+  doc.moveDown(0.5);
+  result.revisionPoints.forEach((p) => {
+    doc.fontSize(12).text(`• ${p}`);
+  });
+
+  doc.moveDown();
+
+  // Questions
+  doc.fontSize(16).text("Important Questions");
+  doc.moveDown(0.5);
+
+  doc.fontSize(13).text("Short Questions:");
+  result.questions.short.forEach((q) => {
+    doc.fontSize(12).text(`• ${q}`);
+  });
+
+  doc.moveDown(0.5);
+  doc.fontSize(13).text("Long Questions:");
+  result.questions.long.forEach((q) => {
+    doc.fontSize(12).text(`• ${q}`);
+  });
+
+  doc.moveDown(0.5);
+  doc.fontSize(13).text("Diagram Question:");
+  doc.fontSize(12).text(result.questions.diagram);
+
+  doc.end();
+
+
+
+
+   
+}
+
+import UserModel from "../models/user.model.js"
+
+export const getCurrentUser = async (req,res) => {
+    try {
+        const userId = req.userId
+        const user = await UserModel.findById(userId)
+        if(!user){
+            return res.status(404).json({message:"Current User is not found"})
+        }
+        return res.status(200).json(user)
+    } catch (error) {
+         return res.status(500).json({message:`getCurrentUser error  ${error}`})
+        
+    }
+}
+
+
+
